@@ -1,0 +1,23 @@
+# Compiled object files
+*.o
+*.img
+*.bin
+
+# Executables
+simple-kvm
+matrix
+
+# Compiled libraries
+*.a
+*.so
+
+# Dependency files
+*.d
+
+# Editor-specific files
+.vscode/
+*.swp
+*~
+
+# MAC OS
+.DS_Store
