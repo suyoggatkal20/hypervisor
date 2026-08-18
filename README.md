@@ -1,4 +1,4 @@
-# Hypervisor and CPU Scheduling
+# LiteVM and CPU Scheduling
 
 This repository contains the implementation of a custom x86 hypervisor and CPU scheduling models built using the Linux Kernel-based Virtual Machine (KVM) API. The project is divided into two parts.
 
