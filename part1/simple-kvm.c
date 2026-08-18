@@ -63,6 +63,16 @@
 #define PDE64_PS (1U << 7)
 #define PDE64_G (1U << 8)
 
+extern const unsigned char guest64[], guest64_end[];
+
+// Ensure your kernel headers define the kvm_translate structure
+struct kvm_translate
+{
+	__u64 gpa;
+	__u64 hpa;
+	__u32 reserved;
+};
+
 struct vm
 {
 	int dev_fd;
@@ -124,7 +134,8 @@ void vm_init(struct vm *vm, size_t mem_size)
 	}
 
 	madvise(vm->mem, mem_size, MADV_MERGEABLE);
-
+	// remove this before submission
+	memset(vm->mem, 0, mem_size);
 	memreg.slot = 0;
 	memreg.flags = 0;
 	memreg.guest_phys_addr = 0;
@@ -166,6 +177,9 @@ void vcpu_init(struct vm *vm, struct vcpu *vcpu)
 
 int run_vm(struct vm *vm, struct vcpu *vcpu, size_t sz)
 {
+	uint32_t hypercall_count = 0;
+	uint32_t exit_in = 0;
+	uint32_t exit_out = 0;
 	struct kvm_regs regs;
 	uint64_t memval = 0;
 
@@ -176,23 +190,101 @@ int run_vm(struct vm *vm, struct vcpu *vcpu, size_t sz)
 			perror("KVM_RUN");
 			exit(1);
 		}
-
+		// printf("\n\njgsvdz1121:: %d\n", vcpu->kvm_run->exit_reason);
+		hypercall_count++;
 		switch (vcpu->kvm_run->exit_reason)
 		{
 		case KVM_EXIT_HLT:
 			goto check;
-
 		case KVM_EXIT_IO:
+			// printf("hello i am sorry!\n");
+			// for (int i = 0; i < 400; i++)
+			// {
+			// 	printf("address=%ul value=%u\n", guest64_end + i, *(guest64_end + i));
+			// 	// printf("address=%ul value=%u\n", vm->mem + 0x200000 - i - 1, *(char *)(vm->mem + 0x200000 - i - 1));
+			// }
+			if (vcpu->kvm_run->io.direction == KVM_EXIT_IO_IN)
+			{
+				exit_in++;
+			}
+			else if (vcpu->kvm_run->io.direction == KVM_EXIT_IO_OUT)
+			{
+				exit_out++;
+			}
 			if (vcpu->kvm_run->io.direction == KVM_EXIT_IO_OUT && vcpu->kvm_run->io.port == 0xE9)
 			{
 				char *p = (char *)vcpu->kvm_run;
+
 				fwrite(p + vcpu->kvm_run->io.data_offset,
 					   vcpu->kvm_run->io.size, 1, stdout);
+
 				fflush(stdout);
 				continue;
 			}
+			else if (vcpu->kvm_run->io.direction == KVM_EXIT_IO_OUT && vcpu->kvm_run->io.port == 0xEA)
+			{
+				char *p = (char *)vcpu->kvm_run;
+				printf("%u\n", *(uint32_t *)(p + vcpu->kvm_run->io.data_offset));
+				continue;
+			}
+			else if (vcpu->kvm_run->io.direction == KVM_EXIT_IO_IN && vcpu->kvm_run->io.port == 0xEB)
+			{
+				char *p = (char *)vcpu->kvm_run;
+				uint32_t *data_pointer = (uint32_t *)(p + vcpu->kvm_run->io.data_offset);
+				*data_pointer = hypercall_count;
+				// printf("suyog\n\n");
+				continue;
+			}
+			else if (vcpu->kvm_run->io.direction == KVM_EXIT_IO_OUT && vcpu->kvm_run->io.port == 0xEC)
+			{
+				char *p = (char *)vcpu->kvm_run;
+				char *p1 = p + vcpu->kvm_run->io.data_offset; // p1 will store location where pointer to string is stored
+				// printf("pointer %u\n", p1);
+				unsigned long pp = *(uint32_t *)p1; // pp will store location at which string is stored
+				// printf("pointer1 %u\n", pp);
+				printf("%s", vm->mem + pp);
+				continue;
+			}
+			else if (vcpu->kvm_run->io.direction == KVM_EXIT_IO_OUT && vcpu->kvm_run->io.port == 0xED)
+			{
+				char *p = (char *)vcpu->kvm_run;
+				char *p1 = p + vcpu->kvm_run->io.data_offset; // p1 will store location where pointer to string is stored
+				unsigned long pp = *(uint32_t *)p1;			  // pp will store location at which string is stored
+				char *finalLocation = vm->mem + pp;
+				sprintf(finalLocation, "IO in:%d\nIO out:%d\n", exit_in, exit_out);
+				continue;
+			}
+			else if (vcpu->kvm_run->io.direction == KVM_EXIT_IO_OUT && vcpu->kvm_run->io.port == 0xEF)
+			{
+				char *p = (char *)vcpu->kvm_run;
+				char *p1 = p + vcpu->kvm_run->io.data_offset; // p1 will store location where pointer to string is stored
+				unsigned long pp = *(uint32_t *)p1;			  // pp will store location at which string is stored
+				uint32_t *finalLocation = (uint32_t *)(vm->mem + pp);
+				uint32_t gva = *finalLocation;
+				struct kvm_translation translate;
+				memset(&translate, 0, sizeof(translate));
+				translate.linear_address = gva;
+				translate.valid = 0;
+				int ret = ioctl(vcpu->vcpu_fd, KVM_TRANSLATE, &translate);
+				if (ret == -1)
+				{
+					perror("ioctl KVM_TRANSLATE failed");
+					close(vm->vm_fd);
+					exit(EXIT_FAILURE);
+				}
+				if (translate.valid)
+				{
+					*finalLocation = (unsigned long)(translate.physical_address + vm->mem);
+				}
+				else
+				{
+					*finalLocation = 0;
+					printf("Invalid GVA\n");
+				}
 
-			/* fall through */
+				continue;
+			}
+			continue;
 		default:
 			fprintf(stderr, "Got exit_reason %d,"
 							" expected KVM_EXIT_HLT (%d)\n",

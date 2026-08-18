@@ -168,17 +168,31 @@ void vcpu_init(struct vm *vm, struct vcpu *vcpu)
 int run_vm(struct vm *vm1, struct vm *vm2, struct vcpu *vcpu1, struct vcpu *vcpu2, size_t sz)
 {
 	struct kvm_regs regs;
-	struct vm *vm = NULL;
-	struct vcpu *vcpu = NULL;
+	struct vm *vm = vm2;
+	struct vcpu *vcpu = vcpu2;
 	uint64_t memval = 0;
+	int *buffer_vm1 = NULL, *buffer_vm2 = NULL;
+	//
+
 	for (;;)
 	{
+		if (vm == vm1)
+		{
+			vm = vm2;
+			vcpu=vcpu2;
+		}
+		else
+		{
+			vm = vm1;
+			vcpu = vcpu1;
+		}
 		if (ioctl(vcpu->vcpu_fd, KVM_RUN, 0) < 0)
 		{
 			perror("KVM_RUN");
 			exit(1);
 		}
 		sleep(1);
+
 		switch (vcpu->kvm_run->exit_reason)
 		{
 		case KVM_EXIT_HLT:
@@ -193,7 +207,46 @@ int run_vm(struct vm *vm1, struct vm *vm2, struct vcpu *vcpu1, struct vcpu *vcpu
 				fflush(stdout);
 				continue;
 			}
-
+			else if (vcpu->kvm_run->io.direction == KVM_EXIT_IO_OUT && vcpu->kvm_run->io.port == 0xEA)
+			{
+				char *p = (char *)vcpu->kvm_run;
+				char *p1 = p + vcpu->kvm_run->io.data_offset; // p1 will store location where pointer to string is stored
+				unsigned long pp = *(uint32_t *)p1;			  // pp will store location at which string is stored
+				buffer_vm1 = (int *)(vm->mem + pp);
+				continue;
+			}
+			else if (vcpu->kvm_run->io.direction == KVM_EXIT_IO_OUT && vcpu->kvm_run->io.port == 0xEB)
+			{
+				char *p = (char *)vcpu->kvm_run;
+				char *p1 = p + vcpu->kvm_run->io.data_offset; // p1 will store location where pointer to string is stored
+				unsigned long pp = *(uint32_t *)p1;			  // pp will store location at which string is stored
+				buffer_vm2 = (int *)(vm->mem + pp);
+				continue;
+			}
+			else if (buffer_vm1 && buffer_vm2 && vcpu->kvm_run->io.direction == KVM_EXIT_IO_OUT && vcpu->kvm_run->io.port == 0xEC)
+			{
+				printf("VMFD: %d Produced Values: ", vm->vm_fd);
+				for (int i = 0; i < 5; i++)
+				{
+					printf("%d ", buffer_vm1[i]);
+					buffer_vm2[i] = buffer_vm1[i];
+				}
+				printf("\n");
+				continue;
+			}
+			else if (buffer_vm1 && buffer_vm2 && vcpu->kvm_run->io.direction == KVM_EXIT_IO_OUT && vcpu->kvm_run->io.port == 0xED)
+			{
+				printf("VMFD: %d Consumed Values: ", vm->vm_fd);
+				for (int i = 0; i < 5; i++)
+				{
+					printf("%d ", buffer_vm2[i]);
+				}
+				printf("\n");
+				continue;
+			}
+			printf("VMFD: %d KVM_EXIT_DEBUG1\n", vm->vm_fd);
+			setbuf(stdout, NULL);
+			continue;
 			/* fall through */
 		default:
 			fprintf(stderr, "Got exit_reason %d,"
@@ -286,7 +339,7 @@ int run_protected_mode1(struct vm *vm, struct vcpu *vcpu)
 	}
 
 	memcpy(vm->mem, guest3a, guest3a_end - guest3a);
-	printf("VMFD: %d Loaded Program with size: %ld", vm->vm_fd, guest3a_end - guest3a);
+	printf("VMFD: %d Loaded Program with size: %ld\n", vm->vm_fd, guest3a_end - guest3a);
 	return 0;
 }
 
@@ -322,7 +375,7 @@ int run_protected_mode2(struct vm *vm, struct vcpu *vcpu)
 	}
 
 	memcpy(vm->mem, guest3b, guest3b_end - guest3b);
-	printf("VMFD: %d Loaded Program with size: %ld", vm->vm_fd, guest3b_end - guest3b);
+	printf("VMFD: %d Loaded Program with size: %ld\n", vm->vm_fd, guest3b_end - guest3b);
 	return 0;
 }
 

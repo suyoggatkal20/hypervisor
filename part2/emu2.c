@@ -260,19 +260,83 @@ exit_kvm:
 
 void kvm_run_vm(struct vm *vm1, struct vm *vm2)
 {
-    if (pthread_create(&(vm1->vcpus->vcpu_thread), (const pthread_attr_t *)NULL, vm1->vcpus->vcpu_thread_func, vm1) != 0)
+    int ret = 0;
+    kvm_reset_vcpu(vm1->vcpus);
+    kvm_reset_vcpu(vm2->vcpus);
+    struct vm *vm_scheduled;
+    int p = -1;
+    int data[3] = {0};
+    while (1)
     {
-        perror("can not create kvm thread");
-        exit(1);
-    }
-    if (pthread_create(&(vm2->vcpus->vcpu_thread), (const pthread_attr_t *)NULL, vm2->vcpus->vcpu_thread_func, vm2) != 0)
-    {
-        perror("can not create kvm thread");
-        exit(1);
-    }
-    pthread_join(vm1->vcpus->vcpu_thread, NULL);
-    pthread_join(vm2->vcpus->vcpu_thread, NULL);
+        p = (p + 1) % 9;
+        if (p < 3)
+        {
+            vm_scheduled = vm1;
+        }
+        else
+        {
+            vm_scheduled = vm2;
+        }
+        
+        // commented this to to make sure output match with given output
+        // printf("VMFD: %d started running\n", vm_scheduled->vm_fd);
+        ret = ioctl(vm_scheduled->vcpus->vcpu_fd, KVM_RUN, 0);
+        if (ret)
+            printf("VMFD: %d stopped running - exit reason: %d\n", vm_scheduled->vm_fd, vm_scheduled->vcpus->kvm_run->exit_reason);
 
+        switch (vm_scheduled->vcpus->kvm_run->exit_reason)
+        {
+        case KVM_EXIT_UNKNOWN:
+            printf("VMFD: %d KVM_EXIT_UNKNOWN\n", vm_scheduled->vm_fd);
+            break;
+        case KVM_EXIT_DEBUG:
+            printf("VMFD: %d KVM_EXIT_DEBUG\n", vm_scheduled->vm_fd);
+            break;
+        case KVM_EXIT_IO:
+            printf("VMFD: %d KVM_EXIT_IO\n", vm_scheduled->vm_fd);
+            if (vm_scheduled->vcpus->kvm_run->io.direction == KVM_EXIT_IO_OUT && vm_scheduled->vcpus->kvm_run->io.port == 0x10)
+            {
+                printf("VMFD: %d Produced value: %d\n", vm_scheduled->vm_fd, *(int *)((char *)(vm_scheduled->vcpus->kvm_run) + vm_scheduled->vcpus->kvm_run->io.data_offset));
+                data[p] = *(int *)((char *)(vm_scheduled->vcpus->kvm_run) + vm_scheduled->vcpus->kvm_run->io.data_offset);
+            }
+            else if (vm_scheduled->vcpus->kvm_run->io.direction == KVM_EXIT_IO_IN && vm_scheduled->vcpus->kvm_run->io.port == 0x11)
+            {
+                *(int *)((char *)(vm_scheduled->vcpus->kvm_run) + vm_scheduled->vcpus->kvm_run->io.data_offset) = data[(p-3)/2];
+                printf("VMFD: %d Consuming the number\n", vm_scheduled->vm_fd);
+            }
+            else if (vm_scheduled->vcpus->kvm_run->io.direction == KVM_EXIT_IO_OUT && vm_scheduled->vcpus->kvm_run->io.port == 0x12)
+            {
+                // *(int *)((char *)(vm_scheduled->vcpus->kvm_run) + vm_scheduled->vcpus->kvm_run->io.data_offset) = data;
+                printf("VMFD: %d Consumed value : %d\n", vm_scheduled->vm_fd, *(int *)((char *)(vm_scheduled->vcpus->kvm_run) + vm_scheduled->vcpus->kvm_run->io.data_offset));
+            }
+
+            sleep(3);
+            break;
+        case KVM_EXIT_MMIO:
+            printf("VMFD: %d KVM_EXIT_MMIO\n", vm_scheduled->vm_fd);
+            break;
+        case KVM_EXIT_INTR:
+            printf("VMFD: %d KVM_EXIT_INTR\n", vm_scheduled->vm_fd);
+            break;
+        case KVM_EXIT_SHUTDOWN:
+            printf("VMFD: %d KVM_EXIT_SHUTDOWN\n", vm_scheduled->vm_fd);
+            goto exit_kvm;
+            break;
+        default:
+            printf("VMFD: %d KVM PANIC\n", vm_scheduled->vm_fd);
+            printf("VMFD: %d KVM exit reason: %d\n", vm_scheduled->vm_fd, vm_scheduled->vcpus->kvm_run->exit_reason);
+            goto exit_kvm;
+        }
+
+        if (ret < 0 && vm_scheduled->vcpus->kvm_run->exit_reason != KVM_EXIT_INTR)
+        {
+            fprintf(stderr, "VMFD: %d KVM_RUN failed\n", vm_scheduled->vm_fd);
+            printf("VMFD: %d KVM_RUN return value %d\n", vm_scheduled->vm_fd, ret);
+            exit(1);
+        }
+    }
+
+exit_kvm:
     // Remove everything in the function above this line and replace it with your code here
 }
 

@@ -63,6 +63,106 @@
 #define PDE64_PS (1U << 7)
 #define PDE64_G (1U << 8)
 
+char buffer[10000];
+static uint32_t head_offset = 0;
+void *my_malloc(uint32_t size)
+{
+	void *return_val = buffer + head_offset;
+	head_offset += size;
+	return return_val;
+}
+int *vm1queue;
+int *vm2queue;
+struct queue
+{
+	int *ptr;
+	int front;
+	int back;
+	int size;
+};
+
+int isFull(struct queue *q)
+{
+	return (q->back + 1) % q->size == q->front;
+}
+int isEmpty(struct queue *q)
+{
+	return q->front == -1;
+}
+int push(struct queue *q, int val)
+{
+	if (isFull(q))
+	{
+		return 0;
+	}
+	else
+	{
+		if (isEmpty(q))
+		{
+			q->back = 0;
+			q->front = 0;
+		}
+		else
+		{
+			q->back = (q->back + 1) % q->size;
+		}
+
+		(q->ptr)[q->back] = val;
+		return 1;
+	}
+}
+int pop(struct queue *q, int *val)
+{
+	if (isEmpty(q))
+	{
+		return 0;
+	}
+	else
+	{
+		*val = (q->ptr)[q->front];
+		if (q->front == q->back)
+		{
+			q->back = -1;
+			q->front = -1;
+		}
+		else
+		{
+			q->front = (q->front + 1) % q->size;
+		}
+		return 1;
+	}
+}
+void printQueue(struct queue *q)
+{
+	printf("HYPVSR: [");
+	if (q->front != -1)
+	{
+		int idx = q->front - 1;
+		while (idx != q->back)
+		{
+			idx = (idx + 1) % q->size;
+			printf(" %d", q->ptr[idx]);
+		}
+	}
+	printf("]\n");
+}
+struct queue initQueue(int size)
+{
+	struct queue q;
+	q.ptr = (int *)my_malloc(sizeof(int) * size);
+	q.back = -1;
+	q.front = -1;
+	q.size = size;
+	return q;
+}
+
+uint64_t rdtsc()
+{
+	uint32_t lo, hi;
+	asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+	return ((uint64_t)hi << 32) | lo;
+}
+
 struct vm
 {
 	int dev_fd;
@@ -179,36 +279,187 @@ int run_vm(struct vm *vm1, struct vm *vm2, struct vcpu *vcpu1, struct vcpu *vcpu
 	struct vm *vm = NULL;
 	struct vcpu *vcpu = NULL;
 	uint64_t memval = 0;
-	for (;;)
+	struct queue q = initQueue(20);
+	int init = 0;
+	int schedule = 0;
+	int turn = 1;
+
+	for (; schedule < 100;)
 	{
-		if (ioctl(vcpu->vcpu_fd, KVM_RUN, 0) < 0)
+
+		if (init)
 		{
-			perror("KVM_RUN");
-			exit(1);
+
+			turn = sched_order[schedule++] - '1';
+		}
+		else
+		{
+			turn = !turn;
+		}
+		if (turn)
+		{
+			vm = vm2;
+			vcpu = vcpu2;
+		}
+		else
+		{
+			vm = vm1;
+			vcpu = vcpu1;
 		}
 		sleep(1);
-		switch (vcpu->kvm_run->exit_reason)
+		for (;;)
 		{
-		case KVM_EXIT_HLT:
-			goto check;
-
-		case KVM_EXIT_IO:
-			if (vcpu->kvm_run->io.direction == KVM_EXIT_IO_OUT && vcpu->kvm_run->io.port == 0xE9)
-			{ // HC_print8bit
-				char *p = (char *)vcpu->kvm_run;
-				fwrite(p + vcpu->kvm_run->io.data_offset,
-					   vcpu->kvm_run->io.size, 1, stdout);
-				fflush(stdout);
-				continue;
+			if (ioctl(vcpu->vcpu_fd, KVM_RUN, 0) < 0)
+			{
+				perror("KVM_RUN");
+				exit(1);
 			}
+			switch (vcpu->kvm_run->exit_reason)
+			{
+			case KVM_EXIT_HLT:
+				goto check;
 
-			/* fall through */
-		default:
-			fprintf(stderr, "Got exit_reason %d,"
-							" expected KVM_EXIT_HLT (%d)\n",
-					vcpu->kvm_run->exit_reason, KVM_EXIT_HLT);
-			exit(1);
+			case KVM_EXIT_IO:
+				if (vcpu->kvm_run->io.direction == KVM_EXIT_IO_OUT && vcpu->kvm_run->io.port == 0xE9)
+				{
+					char *p = (char *)vcpu->kvm_run;
+					fwrite(p + vcpu->kvm_run->io.data_offset,
+						   vcpu->kvm_run->io.size, 1, stdout);
+					fflush(stdout);
+					continue;
+				}
+				else if (vcpu->kvm_run->io.direction == KVM_EXIT_IO_OUT && vcpu->kvm_run->io.port == 0xEA)
+				{
+					char *p = (char *)vcpu->kvm_run;
+					char *p1 = p + vcpu->kvm_run->io.data_offset; // p1 will store location where pointer to string is stored
+					unsigned long pp = *(uint32_t *)p1;			  // pp will store location at which string is stored
+					vm1queue = (int *)(vm->mem + pp);
+					goto nextSchedule;
+				}
+				else if (vcpu->kvm_run->io.direction == KVM_EXIT_IO_OUT && vcpu->kvm_run->io.port == 0xEB)
+				{
+					char *p = (char *)vcpu->kvm_run;
+					char *p1 = p + vcpu->kvm_run->io.data_offset; // p1 will store location where pointer to string is stored
+					unsigned long pp = *(int32_t *)p1;			  // pp will store location at which string is stored
+					vm2queue = (int *)(vm->mem + pp);
+					init = 1;
+					goto nextSchedule;
+				}
+				else if (vcpu->kvm_run->io.direction == KVM_EXIT_IO_OUT && vcpu->kvm_run->io.port == 0xEC) // update front (consuming data)
+				{
+
+					char *p = (char *)vcpu->kvm_run;
+					char *p1 = p + vcpu->kvm_run->io.data_offset; // p1 will store location where pointer to string is stored
+					unsigned long pp = *(uint32_t *)p1;			  // pp will store location at which string is stored
+					int32_t *finalLocation = (int32_t *)(vm->mem + pp);
+
+					int newFront = finalLocation[0]; // pp will store location at which string is stored
+					// int newBack = finalLocation[1];
+					int consumedElements;
+					// printf("old back: %d new back: %d\n", q.back, newBack);
+					// printf("old front: %d new front: %d\n", q.front, newFront);
+					if (newFront != -1)
+					{
+						if (newFront >= q.front)
+						{
+							consumedElements = newFront - q.front;
+						}
+						else
+						{
+							consumedElements = q.size - q.front + newFront;
+						}
+						printf("VMFD: %d Consumed %d Values:", vm->vm_fd, consumedElements);
+						for (int l = 0; l < consumedElements; l++)
+						{
+							int popVal = 0;
+							pop(&q, &popVal);
+							printf(" %d", popVal);
+						}
+						printf("\n");
+					}
+					else
+					{
+						if (q.back == -1 && q.front == -1)
+						{
+							consumedElements = 0;
+						}
+						else if (q.back >= q.front)
+						{
+							consumedElements = q.back - q.front + 1;
+						}
+						else
+						{
+							consumedElements = q.size - q.front + q.back + 1;
+						}
+						printf("VMFD: %d Consumed %d Values:", vm->vm_fd, consumedElements);
+						for (int l = 0; l < consumedElements; l++)
+						{
+							int popVal = 0;
+							pop(&q, &popVal);
+							printf(" %d", popVal);
+						}
+						printf("\n");
+					}
+					goto nextSchedule;
+				}
+				else if (vcpu->kvm_run->io.direction == KVM_EXIT_IO_OUT && vcpu->kvm_run->io.port == 0xED) // update back(Producing data)
+				{
+					printQueue(&q);
+					char *p = (char *)vcpu->kvm_run;
+					char *p1 = p + vcpu->kvm_run->io.data_offset; // p1 will store location where pointer to string is stored
+					unsigned long pp = *(uint32_t *)p1;			  // pp will store location at which string is stored
+					int32_t *finalLocation = (int32_t *)(vm->mem + pp);
+
+					// int newFront = finalLocation[0]; // pp will store location at which string is stored
+					int newBack = finalLocation[1];
+					int producedElements;
+					// printf("old back: %d new back: %d\n", q.back, newBack);
+					// printf("old front: %d new front: %d\n", q.front, newFront);
+					if (newBack >= q.back)
+					{
+						producedElements = newBack - q.back;
+					}
+					else
+					{
+						producedElements = q.size - q.back + newBack;
+					}
+					printf("VMFD: %d Produced %d Values:", vm->vm_fd, producedElements);
+					for (int l = 0; l < producedElements; l++)
+					{
+						printf(" %d", vm1queue[(q.back + 1) % q.size]);
+						push(&q, vm1queue[(q.back + 1) % q.size]);
+					}
+					printf("\n");
+					goto nextSchedule;
+				}
+				else if (vcpu->kvm_run->io.direction == KVM_EXIT_IO_IN && vcpu->kvm_run->io.port == 0xEE) // get front
+				{
+					char *p = (char *)vcpu->kvm_run;
+					char *p1 = p + vcpu->kvm_run->io.data_offset; // p1 will store location where pointer to string is stored
+					*(int32_t *)p1 = q.front;
+					continue;
+				}
+				else if (vcpu->kvm_run->io.direction == KVM_EXIT_IO_IN && vcpu->kvm_run->io.port == 0xEF) // get back
+				{
+					char *p = (char *)vcpu->kvm_run;
+					char *p1 = p + vcpu->kvm_run->io.data_offset; // p1 will store location where pointer to string is stored
+					// printf("reading back: %d\n", q.back);
+					*(int32_t *)p1 = q.back;
+					continue;
+				}
+				printf("VMFD: %d KVM_EXIT_DEBUG1\n", vm->vm_fd);
+				setbuf(stdout, NULL);
+				continue;
+				/* fall through */
+			default:
+				fprintf(stderr, "Got exit_reason %d,"
+								" expected KVM_EXIT_HLT (%d)\n",
+						vcpu->kvm_run->exit_reason, KVM_EXIT_HLT);
+				exit(1);
+			}
 		}
+
+	nextSchedule:
 	}
 
 check:
@@ -294,7 +545,7 @@ int run_protected_mode1(struct vm *vm, struct vcpu *vcpu)
 	}
 
 	memcpy(vm->mem, guest4a, guest4a_end - guest4a);
-	printf("VMFD: %d Loaded Program with size: %ld", vm->vm_fd, guest4a_end - guest4a);
+	printf("VMFD: %d Loaded Program with size: %ld\n", vm->vm_fd, guest4a_end - guest4a);
 	return 0;
 }
 
@@ -330,7 +581,7 @@ int run_protected_mode2(struct vm *vm, struct vcpu *vcpu)
 	}
 
 	memcpy(vm->mem, guest4b, guest4b_end - guest4b);
-	printf("VMFD: %d Loaded Program with size: %ld", vm->vm_fd, guest4b_end - guest4b);
+	printf("VMFD: %d Loaded Program with size: %ld\n", vm->vm_fd, guest4b_end - guest4b);
 	return 0;
 }
 
